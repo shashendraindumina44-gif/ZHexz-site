@@ -1,11 +1,9 @@
 const express = require('express');
-const { Server } = require('socket.io');
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
 const https = require('https');
 
-// Vercel Serverless පරිසරයේදී /tmp folder එක පමණක් ලෝකල් write කිරීමට දේ
 const IS_VERCEL = process.env.VERCEL;
 const MESSAGES_FILE = IS_VERCEL ? path.join('/tmp', 'messages.json') : path.join(__dirname, 'messages.json');
 const USERS_FILE = IS_VERCEL ? path.join('/tmp', 'users.json') : path.join(__dirname, 'users.json');
@@ -16,8 +14,6 @@ function getMessages() {
     try { return JSON.parse(fs.readFileSync(MESSAGES_FILE, 'utf8')); } catch(e) { return []; }
 }
 function saveMessages(msgs) { fs.writeFileSync(MESSAGES_FILE, JSON.stringify(msgs, null, 2)); }
-
-const activeUsers = new Map();
 
 function fetchAI(prompt) {
     return new Promise((resolve, reject) => {
@@ -33,7 +29,6 @@ function fetchAI(prompt) {
 
 const app = express();
 
-// Uploads directory configuration
 const uploadDir = IS_VERCEL ? path.join('/tmp', 'uploads') : path.join(__dirname, 'public', 'uploads');
 if (!fs.existsSync(uploadDir)) {
     fs.mkdirSync(uploadDir, { recursive: true });
@@ -48,11 +43,12 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage });
 
+app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
 if (IS_VERCEL) {
     app.use('/uploads', express.static('/tmp/uploads'));
 }
-app.use(express.json());
 
 function getUsers() {
     if (!fs.existsSync(USERS_FILE)) {
@@ -74,16 +70,13 @@ function getGroups() {
 }
 function saveGroups(groups) { fs.writeFileSync(GROUPS_FILE, JSON.stringify(groups, null, 2)); }
 
-// Auth API
+// APIs
 app.post('/api/login', (req, res) => {
     const { username, password } = req.body;
     const users = getUsers();
     const user = users.find(u => u.username === username && u.password === password);
     
     if (user) {
-        if (activeUsers.has(username) && !IS_VERCEL) {
-            return res.status(403).json({ success: false, message: 'Account is already logged in on another device.' });
-        }
         res.json({ 
             success: true, 
             isAdmin: username === 'KernelX',
@@ -95,7 +88,6 @@ app.post('/api/login', (req, res) => {
     }
 });
 
-// Update Profile API
 app.post('/api/update-profile', (req, res) => {
     const { username, password, avatar, theme } = req.body;
     const users = getUsers();
@@ -111,7 +103,6 @@ app.post('/api/update-profile', (req, res) => {
     }
 });
 
-// Admin User Creation API
 app.post('/api/create-user', (req, res) => {
     const { adminUsername, adminPassword, newUsername, newPassword } = req.body;
     if (adminUsername !== 'KernelX' || adminPassword !== 'Slrambo1234@') {
@@ -163,112 +154,16 @@ app.post('/upload', upload.single('media'), (req, res) => {
     } else { res.status(400).json({ success: false, message: 'No file uploaded' }); }
 });
 
-// Front-end SPA routing fallback
+// HTML SPA Fallback
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// Vercel එකේදී කෙලින්ම app එක export කරන්න ඕනේ
+// Local run කිරීමට පමණක් listen භාවිතා කරයි, Vercel එකට මේක බලපාන්නේ නැත
 if (!IS_VERCEL) {
-    const http = require('http');
-    const server = http.createServer(app);
-    const io = new Server(server);
-    
-    // Socket.io කේතය local run වෙද්දී විතරක් වැඩ කරයි
-    io.on('connection', (socket) => {
-        socket.on('join', (data) => {
-            const users = getUsers();
-            const user = users.find(u => u.username === data.username && u.password === data.password);
-            if (user) {
-                socket.username = data.username;
-                socket.avatar = user.avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(data.username)}&background=random`;
-                activeUsers.set(data.username, socket.id);
-                io.emit('system_message', { text: `${data.username} joined the chat`, groupId: 'group_main' });
-            } else { socket.disconnect(); }
-        });
-
-        socket.on('chat_message', async (data) => {
-            const msgId = Date.now() + Math.random().toString(36).substr(2, 9);
-            const newMsg = {
-                id: msgId,
-                groupId: data.groupId || 'group_main',
-                user: socket.username,
-                avatar: socket.avatar,
-                text: data.text,
-                replyTo: data.replyTo || null,
-                time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-            };
-            const messages = getMessages();
-            messages.push(newMsg);
-            saveMessages(messages);
-            io.emit('chat_message', newMsg);
-
-            if (data.text.toLowerCase().includes('@ai') || data.groupId === 'ai_chat') {
-                const prompt = data.text.replace(/@ai/gi, '').trim();
-                if (prompt) {
-                    try {
-                        const aiData = await fetchAI(prompt);
-                        if (aiData && aiData.response) {
-                            const aiMsg = {
-                                id: Date.now() + Math.random().toString(36).substr(2, 9),
-                                groupId: data.groupId || 'group_main',
-                                user: 'AI Assistant',
-                                avatar: 'https://ui-avatars.com/api/?name=AI&background=0D8ABC&color=fff',
-                                text: aiData.response,
-                                replyTo: { id: msgId, user: socket.username, text: data.text },
-                                time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                            };
-                            messages.push(aiMsg);
-                            saveMessages(messages);
-                            io.emit('chat_message', aiMsg);
-                        }
-                    } catch (e) { console.error('AI Error:', e); }
-                }
-            }
-        });
-
-        socket.on('media_message', (data) => {
-            const msgId = Date.now() + Math.random().toString(36).substr(2, 9);
-            const newMsg = {
-                id: msgId,
-                groupId: data.groupId || 'group_main',
-                user: socket.username,
-                avatar: socket.avatar,
-                url: data.url,
-                type: data.type,
-                replyTo: data.replyTo || null,
-                time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-            };
-            const messages = getMessages();
-            messages.push(newMsg);
-            saveMessages(messages);
-            io.emit('media_message', newMsg);
-        });
-
-        socket.on('delete_message', (data) => {
-            const messages = getMessages();
-            const msgIndex = messages.findIndex(m => m.id === data.id);
-            if (msgIndex !== -1) {
-                const msg = messages[msgIndex];
-                if (msg.user === socket.username || socket.username === 'KernelX') {
-                    messages.splice(msgIndex, 1);
-                    saveMessages(messages);
-                    io.emit('delete_message', { id: data.id, groupId: data.groupId });
-                }
-            }
-        });
-
-        socket.on('disconnect', () => {
-            if (socket.username) {
-                io.emit('system_message', { text: `${socket.username} left the chat`, groupId: 'group_main' });
-                activeUsers.delete(socket.username);
-            }
-        });
-    });
-
     const PORT = process.env.PORT || 3000;
-    server.listen(PORT, () => {
-        console.log(`Zhexz Chat Server running on http://localhost:${PORT}`);
+    app.listen(PORT, () => {
+        console.log(`Server running on http://localhost:${PORT}`);
     });
 }
 
