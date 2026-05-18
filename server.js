@@ -1,15 +1,19 @@
 const express = require('express');
-const http = require('http');
 const { Server } = require('socket.io');
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
 const https = require('https');
 
-const MESSAGES_FILE = path.join(__dirname, 'messages.json');
+// Vercel Serverless පරිසරයේදී /tmp folder එක පමණක් ලෝකල් write කිරීමට දේ
+const IS_VERCEL = process.env.VERCEL;
+const MESSAGES_FILE = IS_VERCEL ? path.join('/tmp', 'messages.json') : path.join(__dirname, 'messages.json');
+const USERS_FILE = IS_VERCEL ? path.join('/tmp', 'users.json') : path.join(__dirname, 'users.json');
+const GROUPS_FILE = IS_VERCEL ? path.join('/tmp', 'groups.json') : path.join(__dirname, 'groups.json');
+
 function getMessages() {
     if (!fs.existsSync(MESSAGES_FILE)) { fs.writeFileSync(MESSAGES_FILE, JSON.stringify([])); return []; }
-    return JSON.parse(fs.readFileSync(MESSAGES_FILE, 'utf8'));
+    try { return JSON.parse(fs.readFileSync(MESSAGES_FILE, 'utf8')); } catch(e) { return []; }
 }
 function saveMessages(msgs) { fs.writeFileSync(MESSAGES_FILE, JSON.stringify(msgs, null, 2)); }
 
@@ -28,33 +32,27 @@ function fetchAI(prompt) {
 }
 
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server);
 
-// Create uploads directory if it doesn't exist
-const uploadDir = path.join(__dirname, 'public', 'uploads');
+// Uploads directory configuration
+const uploadDir = IS_VERCEL ? path.join('/tmp', 'uploads') : path.join(__dirname, 'public', 'uploads');
 if (!fs.existsSync(uploadDir)) {
     fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-// Multer storage configuration for media sharing
 const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, uploadDir);
-    },
+    destination: (req, file, cb) => { cb(null, uploadDir); },
     filename: (req, file, cb) => {
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
         cb(null, uniqueSuffix + path.extname(file.originalname));
     }
 });
-
 const upload = multer({ storage: storage });
 
 app.use(express.static(path.join(__dirname, 'public')));
+if (IS_VERCEL) {
+    app.use('/uploads', express.static('/tmp/uploads'));
+}
 app.use(express.json());
-
-// User Management
-const USERS_FILE = path.join(__dirname, 'users.json');
 
 function getUsers() {
     if (!fs.existsSync(USERS_FILE)) {
@@ -62,25 +60,19 @@ function getUsers() {
         fs.writeFileSync(USERS_FILE, JSON.stringify(defaultAdmin, null, 2));
         return defaultAdmin;
     }
-    return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
+    try { return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); } catch(e) { return []; }
 }
+function saveUsers(users) { fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2)); }
 
-function saveUsers(users) {
-    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
-}
-
-const GROUPS_FILE = path.join(__dirname, 'groups.json');
 function getGroups() {
     if (!fs.existsSync(GROUPS_FILE)) {
         const defaultGroups = [{ id: 'group_main', name: 'Zhexz Team', desc: 'Global Chat', dp: 'https://ui-avatars.com/api/?name=Zhexz+Team&background=6366f1&color=fff' }];
         fs.writeFileSync(GROUPS_FILE, JSON.stringify(defaultGroups, null, 2));
         return defaultGroups;
     }
-    return JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8'));
+    try { return JSON.parse(fs.readFileSync(GROUPS_FILE, 'utf8')); } catch(e) { return []; }
 }
-function saveGroups(groups) {
-    fs.writeFileSync(GROUPS_FILE, JSON.stringify(groups, null, 2));
-}
+function saveGroups(groups) { fs.writeFileSync(GROUPS_FILE, JSON.stringify(groups, null, 2)); }
 
 // Auth API
 app.post('/api/login', (req, res) => {
@@ -89,7 +81,7 @@ app.post('/api/login', (req, res) => {
     const user = users.find(u => u.username === username && u.password === password);
     
     if (user) {
-        if (activeUsers.has(username)) {
+        if (activeUsers.has(username) && !IS_VERCEL) {
             return res.status(403).json({ success: false, message: 'Account is already logged in on another device.' });
         }
         res.json({ 
@@ -122,19 +114,15 @@ app.post('/api/update-profile', (req, res) => {
 // Admin User Creation API
 app.post('/api/create-user', (req, res) => {
     const { adminUsername, adminPassword, newUsername, newPassword } = req.body;
-    
     if (adminUsername !== 'KernelX' || adminPassword !== 'Slrambo1234@') {
         return res.status(403).json({ success: false, message: 'Unauthorized. Admin only.' });
     }
-
     const users = getUsers();
     if (users.find(u => u.username === newUsername)) {
         return res.status(400).json({ success: false, message: 'User already exists!' });
     }
-
     users.push({ username: newUsername, password: newPassword });
     saveUsers(users);
-    
     res.json({ success: true, message: `User ${newUsername} created!` });
 });
 
@@ -142,23 +130,17 @@ app.get('/api/ai', async (req, res) => {
     try {
         const data = await fetchAI(req.query.prompt);
         res.json(data);
-    } catch (e) {
-        res.status(500).json({ success: false });
-    }
+    } catch (e) { res.status(500).json({ success: false }); }
 });
 
-app.get('/api/messages', (req, res) => {
-    res.json({ success: true, messages: getMessages() });
-});
+app.get('/api/messages', (req, res) => { res.json({ success: true, messages: getMessages() }); });
 
 app.get('/api/users-list', (req, res) => {
     const users = getUsers().map(u => ({ username: u.username, avatar: u.avatar || `https://ui-avatars.com/api/?name=${u.username}&background=random` }));
     res.json({ success: true, users });
 });
 
-app.get('/api/groups', (req, res) => {
-    res.json({ success: true, groups: getGroups() });
-});
+app.get('/api/groups', (req, res) => { res.json({ success: true, groups: getGroups() }); });
 
 app.post('/api/create-group', (req, res) => {
     const { name, desc, dp } = req.body;
@@ -175,120 +157,119 @@ app.post('/api/create-group', (req, res) => {
     res.json({ success: true, group: newGroup });
 });
 
-// Handle media upload
 app.post('/upload', upload.single('media'), (req, res) => {
     if (req.file) {
         res.json({ success: true, fileUrl: `/uploads/${req.file.filename}`, type: req.file.mimetype });
-    } else {
-        res.status(400).json({ success: false, message: 'No file uploaded' });
-    }
+    } else { res.status(400).json({ success: false, message: 'No file uploaded' }); }
 });
 
-io.on('connection', (socket) => {
-    console.log('A user connected:', socket.id);
+// Front-end SPA routing fallback
+app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
-    // When a user joins
-    socket.on('join', (data) => {
-        const users = getUsers();
-        const user = users.find(u => u.username === data.username && u.password === data.password);
-        if (user) {
-            socket.username = data.username;
-            socket.avatar = user.avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(data.username)}&background=random`;
-            activeUsers.set(data.username, socket.id);
-            io.emit('system_message', { text: `${data.username} joined the chat`, groupId: 'group_main' });
-        } else {
-            socket.disconnect(); // Reject invalid socket connections
-        }
-    });
+// Vercel එකේදී කෙලින්ම app එක export කරන්න ඕනේ
+if (!IS_VERCEL) {
+    const http = require('http');
+    const server = http.createServer(app);
+    const io = new Server(server);
+    
+    // Socket.io කේතය local run වෙද්දී විතරක් වැඩ කරයි
+    io.on('connection', (socket) => {
+        socket.on('join', (data) => {
+            const users = getUsers();
+            const user = users.find(u => u.username === data.username && u.password === data.password);
+            if (user) {
+                socket.username = data.username;
+                socket.avatar = user.avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(data.username)}&background=random`;
+                activeUsers.set(data.username, socket.id);
+                io.emit('system_message', { text: `${data.username} joined the chat`, groupId: 'group_main' });
+            } else { socket.disconnect(); }
+        });
 
-    // When a user sends a text message
-    socket.on('chat_message', async (data) => {
-        const msgId = Date.now() + Math.random().toString(36).substr(2, 9);
-        const newMsg = {
-            id: msgId,
-            groupId: data.groupId || 'group_main',
-            user: socket.username,
-            avatar: socket.avatar,
-            text: data.text,
-            replyTo: data.replyTo || null,
-            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        };
-        const messages = getMessages();
-        messages.push(newMsg);
-        saveMessages(messages);
-        io.emit('chat_message', newMsg);
+        socket.on('chat_message', async (data) => {
+            const msgId = Date.now() + Math.random().toString(36).substr(2, 9);
+            const newMsg = {
+                id: msgId,
+                groupId: data.groupId || 'group_main',
+                user: socket.username,
+                avatar: socket.avatar,
+                text: data.text,
+                replyTo: data.replyTo || null,
+                time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            };
+            const messages = getMessages();
+            messages.push(newMsg);
+            saveMessages(messages);
+            io.emit('chat_message', newMsg);
 
-        if (data.text.toLowerCase().includes('@ai') || data.groupId === 'ai_chat') {
-            const prompt = data.text.replace(/@ai/gi, '').trim();
-            if (prompt) {
-                try {
-                    const aiData = await fetchAI(prompt);
-                    if (aiData && aiData.response) {
-                        const aiMsg = {
-                            id: Date.now() + Math.random().toString(36).substr(2, 9),
-                            groupId: data.groupId || 'group_main',
-                            user: 'AI Assistant',
-                            avatar: 'https://ui-avatars.com/api/?name=AI&background=0D8ABC&color=fff',
-                            text: aiData.response,
-                            replyTo: { id: msgId, user: socket.username, text: data.text },
-                            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                        };
-                        messages.push(aiMsg);
-                        saveMessages(messages);
-                        io.emit('chat_message', aiMsg);
-                    }
-                } catch (e) {
-                    console.error('AI Error:', e);
+            if (data.text.toLowerCase().includes('@ai') || data.groupId === 'ai_chat') {
+                const prompt = data.text.replace(/@ai/gi, '').trim();
+                if (prompt) {
+                    try {
+                        const aiData = await fetchAI(prompt);
+                        if (aiData && aiData.response) {
+                            const aiMsg = {
+                                id: Date.now() + Math.random().toString(36).substr(2, 9),
+                                groupId: data.groupId || 'group_main',
+                                user: 'AI Assistant',
+                                avatar: 'https://ui-avatars.com/api/?name=AI&background=0D8ABC&color=fff',
+                                text: aiData.response,
+                                replyTo: { id: msgId, user: socket.username, text: data.text },
+                                time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                            };
+                            messages.push(aiMsg);
+                            saveMessages(messages);
+                            io.emit('chat_message', aiMsg);
+                        }
+                    } catch (e) { console.error('AI Error:', e); }
                 }
             }
-        }
-    });
+        });
 
-    // When a user sends media
-    socket.on('media_message', (data) => {
-        const msgId = Date.now() + Math.random().toString(36).substr(2, 9);
-        const newMsg = {
-            id: msgId,
-            groupId: data.groupId || 'group_main',
-            user: socket.username,
-            avatar: socket.avatar,
-            url: data.url,
-            type: data.type,
-            replyTo: data.replyTo || null,
-            time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        };
-        const messages = getMessages();
-        messages.push(newMsg);
-        saveMessages(messages);
-        io.emit('media_message', newMsg);
-    });
+        socket.on('media_message', (data) => {
+            const msgId = Date.now() + Math.random().toString(36).substr(2, 9);
+            const newMsg = {
+                id: msgId,
+                groupId: data.groupId || 'group_main',
+                user: socket.username,
+                avatar: socket.avatar,
+                url: data.url,
+                type: data.type,
+                replyTo: data.replyTo || null,
+                time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            };
+            const messages = getMessages();
+            messages.push(newMsg);
+            saveMessages(messages);
+            io.emit('media_message', newMsg);
+        });
 
-    // When a user deletes a message
-    socket.on('delete_message', (data) => {
-        const messages = getMessages();
-        const msgIndex = messages.findIndex(m => m.id === data.id);
-        if (msgIndex !== -1) {
-            const msg = messages[msgIndex];
-            if (msg.user === socket.username || socket.username === 'KernelX') {
-                messages.splice(msgIndex, 1);
-                saveMessages(messages);
-                io.emit('delete_message', { id: data.id, groupId: data.groupId });
+        socket.on('delete_message', (data) => {
+            const messages = getMessages();
+            const msgIndex = messages.findIndex(m => m.id === data.id);
+            if (msgIndex !== -1) {
+                const msg = messages[msgIndex];
+                if (msg.user === socket.username || socket.username === 'KernelX') {
+                    messages.splice(msgIndex, 1);
+                    saveMessages(messages);
+                    io.emit('delete_message', { id: data.id, groupId: data.groupId });
+                }
             }
-        }
+        });
+
+        socket.on('disconnect', () => {
+            if (socket.username) {
+                io.emit('system_message', { text: `${socket.username} left the chat`, groupId: 'group_main' });
+                activeUsers.delete(socket.username);
+            }
+        });
     });
 
-    socket.on('disconnect', () => {
-        if (socket.username) {
-            io.emit('system_message', { text: `${socket.username} left the chat`, groupId: 'group_main' });
-            activeUsers.delete(socket.username);
-        }
-        console.log('User disconnected:', socket.id);
+    const PORT = process.env.PORT || 3000;
+    server.listen(PORT, () => {
+        console.log(`Zhexz Chat Server running on http://localhost:${PORT}`);
     });
-});
+}
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-    console.log(`Zhexz Chat Server running on http://localhost:${PORT}`);
-});
-
-module.exports = server;
+module.exports = app;
